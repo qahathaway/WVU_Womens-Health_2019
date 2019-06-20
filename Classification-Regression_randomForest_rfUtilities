@@ -1,0 +1,215 @@
+library(tidyverse)
+library(reshape2)
+library(xgboost)
+library(randomForest)
+library(rfUtilities)
+
+#RWH = Refined Women's Health data
+RWH = read.csv('file of interest.csv')
+head(RWH)
+summary(RWH)
+
+#Return median results for missing data
+RWH$BPX[is.na(RWH$BPX)] = median(RWH$BPX , na.rm = TRUE)
+RWH$BPx[is.na(RWH$BPx)] = median(RWH$BPx , na.rm = TRUE)
+RWH$Cholesterol[is.na(RWH$Cholesterol)] = median(RWH$Cholesterol , na.rm = TRUE)
+RWH$HDL[is.na(RWH$HDL)] = median(RWH$HDL , na.rm = TRUE)
+RWH$LDL[is.na(RWH$LDL)] = median(RWH$LDL , na.rm = TRUE)
+RWH$Tri[is.na(RWH$Tri)] = median(RWH$Tri , na.rm = TRUE)
+RWH$Age[is.na(RWH$Age)] = median(RWH$Age , na.rm = TRUE)
+
+summary(RWH)
+
+
+###Classification Trees###
+# Classification CV
+RWH$Year <- as.factor(RWH$Year)    	
+set.seed(100)	
+( rf.mdl <- randomForest(RWH[,2:9], RWH[,"Year"], ntree=5000) )
+( rf.cv <- rf.crossValidation(rf.mdl, RWH[,2:9], p=0.10, n=10, ntree=5000) )
+
+# Plot cross validation verses model producers accuracy
+par(mfrow=c(2,2)) 
+plot(rf.cv, type = "cv", main = "CV producers accuracy")
+plot(rf.cv, type = "model", main = "Model producers accuracy")
+
+# Plot cross validation verses model oob
+plot(rf.cv, type = "cv", stat = "oob", main = "CV oob error")
+plot(rf.cv, type = "model", stat = "oob", main = "Model oob error")	  
+
+
+# Classification Single
+set.seed(100)
+ind = sample(2, nrow(RWH), replace=TRUE, prob=c(0.7,0.3))
+trainData = RWH[ind==1,]
+testData = RWH[ind==2,]
+
+RWH_rf = randomForest(Year~., data=trainData, ntree=5000, proximity=TRUE)
+table(predict(RWH_rf), trainData$Year)
+RWH_rf
+par(mfrow=c(1,1))
+plot(RWH_rf)
+importance(RWH_rf)
+
+RWHPred = predict(RWH_rf, newdata=testData)
+table(RWHPred, testData$Year)
+
+plot(margin(RWH_rf, testData$Year))
+CM = table(RWHPred, testData$Year)
+
+accuracy = (sum(diag(CM)))/sum(CM)
+accuracy
+
+library(ROCR)
+predictions=as.vector(RWH_rf$votes[,2])
+pred=prediction(predictions,trainData$Year)
+
+perf_AUC=performance(pred,"auc") #Calculate the AUC value
+AUC=perf_AUC@y.values[[1]]
+
+perf_ROC=performance(pred,"tpr","fpr") #plot the actual ROC curve
+plot(perf_ROC, main="ROC plot")
+text(0.5,0.5,paste("AUC = ",format(AUC, digits=5, scientific=FALSE)))
+
+
+
+
+###Regression Trees###
+# Regression CV
+rf.mdl2 <- randomForest(y=RWH[,"HDL"], x=RWH[,2:9], ntree = 5000)
+( rf.cv2 <- rf.crossValidation(rf.mdl2, RWH[,2:9], p=0.10, n=10, ntree=5000) )
+par(mfrow=c(2,2))
+plot(rf.cv2)  
+plot(rf.cv2, stat= "mse")
+plot(rf.cv2, stat = "var.exp")
+plot(rf.cv2, stat = "mae")
+
+
+# Regression Single
+#categories = unique(RWH$Year, RWH$Year, RWH$Year)
+categories = unique(RWH$Year)
+#split the categories off
+#cat_RWH = data.frame(Year = RWH$Year, Year = RWH$Year, Year = RWH$Year)
+cat_RWH = data.frame(Year = RWH$Year)
+
+for(cat in categories){
+  cat_RWH[,cat] = rep(0, times= nrow(cat_RWH))
+}
+
+for(i in 1:length(cat_RWH$Year)){
+  cat = as.character(cat_RWH$Year[i])
+  cat_RWH[,cat][i] = 1
+}
+
+cat_columns = names(cat_RWH)
+keep_columns = cat_columns[cat_columns != 'Year']
+cat_RWH = select(cat_RWH,one_of(keep_columns))
+drops = c('Year', 'HDL')
+RWH_num =  RWH[ , !(names(RWH) %in% drops)]
+
+
+###Data Distribution Plot###
+ggplot(data = melt(RWH), mapping = aes(x = value)) + 
+  geom_histogram(bins = 30) + facet_wrap(~variable, scales = 'free_x')
+
+
+#scaled_RWH_num = scale(RWH_num)
+
+cleaned_RWH = cbind(cat_RWH, RWH_num, HDL=RWH$HDL)
+#cleaned_RWH = cbind(cat_RWH, scaled_RWH_num, HDL=RWH$HDL)
+
+set.seed(100) # Set a random seed so that same sample can be reproduced in future runs
+
+sample = sample.int(n = nrow(cleaned_RWH), size = floor(.8*nrow(cleaned_RWH)), replace = F)
+train = cleaned_RWH[sample, ] #just the samples
+test  = cleaned_RWH[-sample, ] #everything but the samples
+
+
+train_y = train[,'HDL']
+train_x = train[, names(train) !='HDL']
+
+test_y = test[,'HDL']
+test_x = test[, names(test) !='HDL']
+
+head(train)
+
+
+
+###Unsupervised###
+n=4
+clust.iris <- rf.unsupervised(RWH[,6:13], n=n, proximity = TRUE, 
+                              silhouettes = TRUE)
+rf.unsuper <- as.data.frame(clust.iris$k)
+
+mds <- stats:::cmdscale(clust.iris$distances, eig=TRUE, k=n)
+colnames(mds$points) <- paste("Dim", 1:n)
+mds.col <- ifelse(clust.iris$k == 1, rainbow(4)[1],
+                  ifelse(clust.iris$k == 2, rainbow(4)[2],
+                         ifelse(clust.iris$k == 3, rainbow(4)[3],
+                                ifelse(clust.iris$k == 4, rainbow(4)[4], NA))))
+
+plot(mds$points[,1:2],col=mds.col, pch=20)
+legend("bottomright",levels(RWH$Cluster),col=brewer.pal(n = 5, name = "Set1"), pch=as.numeric(RWH$Cluster))
+
+pairs(mds$points, col=mds.col, pch=20)
+
+write.csv(rf.unsuper, file = "C:/Users/qahathaway/Documents/R/ML_Trial1/Unsupervised.csv")
+
+
+
+########
+# Random Forest Model
+########
+
+rf_model = randomForest(train_x, y = train_y , ntree = 5000, importance = TRUE, proximity = TRUE)
+
+names(rf_model) #these are all the different things you can call from the model.
+
+importance_dat = rf_model$importance
+importance_dat
+
+sorted_predictors = sort(importance_dat[,1], decreasing=TRUE)
+sorted_predictors
+
+###Variance of Importance Plot###
+varImpPlot(rf_model)
+
+library(RColorBrewer)
+library(mlr)
+
+
+
+###MDS Plot###
+rf_model_MDS = randomForest(Year ~ ., RWH, proximity=TRUE,
+                            keep.forest=FALSE)
+par(mfrow=c(1,1))
+MDSplot(rf_model_MDS, k = 2, RWH$Year, palette(brewer.pal(n = 5, name = "Set1")))
+legend("bottomright",levels(RWH$Year),col=brewer.pal(n = 5, name = "Set1"), pch=as.numeric(RWH$Year))
+
+MDSplot(rf_model_MDS, RWH$Year, palette=rep(1, 3), pch=as.numeric(RWH$Year))
+
+
+###Partial Dependence Plot###
+rf_model_PDP = randomForest(Year~., RWH)
+partialPlot(rf_model_PDP, RWH, HDL, "Y2016-2018")
+
+
+###Random Forest Plot###
+plot(randomForest(Year ~ ., RWH, keep.forest=FALSE, ntree=5000), log="y", main=deparse(substitute(randomForest)), type="l")
+
+
+predicted_dat = rf_model$predicted
+#predicted_dat
+
+oob_prediction = predict(rf_model)
+
+
+train_mse = mean(as.numeric((oob_prediction - train_y)^2))
+oob_rmse = sqrt(train_mse)
+oob_rmse
+
+
+y_pred_rf = predict(rf_model , test_x)
+test_mse = mean(((y_pred_rf - test_y)^2))
+test_rmse = sqrt(test_mse)
+test_rmse
